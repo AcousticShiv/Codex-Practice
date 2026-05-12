@@ -1,51 +1,84 @@
+from __future__ import annotations
+
 import importlib
+import sys
+from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 import streamlit as st
 
+# Make sure repo root is importable when Streamlit runs from frontend/
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 st.set_page_config(page_title="M → Tableau Prep Assistant", layout="wide")
 st.title("Power Query M → Tableau Prep Migration Assistant")
+st.caption("Runs fully inside Streamlit. No separate backend is required.")
 
 
-@st.cache_resource
-def get_converter() -> Callable[[str], Any]:
+def _candidate_converter_functions(module: Any) -> List[Callable[[str], Any]]:
     """
-    Try common converter function names inside app.services.converter.
-    Adjust the candidate list only if your converter uses a different name.
-    """
-    module = importlib.import_module("app.services.converter")
+    Return likely converter functions from app.services.converter.
 
-    candidate_names = [
+    This keeps the app resilient even if the function name changes slightly.
+    """
+    preferred_names = [
         "convert_m_code",
+        "convert_m_to_tableau_prep",
+        "convert_power_query_m",
         "convert",
         "generate_conversion",
         "process_m_code",
         "analyze_m_code",
-        "convert_power_query_m",
-        "convert_m_to_tableau_prep",
     ]
 
-    for name in candidate_names:
+    funcs: List[Callable[[str], Any]] = []
+
+    for name in preferred_names:
         fn = getattr(module, name, None)
         if callable(fn):
-            return fn
+            funcs.append(fn)
 
-    raise AttributeError(
-        "No supported converter function found in app.services.converter. "
-        f"Tried: {', '.join(candidate_names)}"
-    )
+    if funcs:
+        return funcs
+
+    # Fallback: pick any public callable with a converter-like name
+    for name in dir(module):
+        if name.startswith("_"):
+            continue
+        if any(token in name.lower() for token in ("convert", "transform", "analy", "process")):
+            fn = getattr(module, name, None)
+            if callable(fn):
+                funcs.append(fn)
+
+    return funcs
+
+
+@st.cache_resource
+def get_converter() -> Callable[[str], Any]:
+    module = importlib.import_module("app.services.converter")
+    funcs = _candidate_converter_functions(module)
+
+    if not funcs:
+        raise AttributeError(
+            "No converter function found in app.services.converter. "
+            "Add a function such as convert_m_code(m_code) or rename your existing one "
+            "to a supported name."
+        )
+
+    return funcs[0]
 
 
 def normalize_result(result: Any) -> Dict[str, Any]:
     """
-    Normalize different possible return shapes into the UI format.
-    Expected final shape:
-    {
-        'summary': str,
-        'tableau_steps': list[str],
-        'flow_diagram': str,
-        'migration_notes': list[str]
-    }
+    Normalize converter output into the UI format.
+
+    Expected keys:
+      - summary: str
+      - tableau_steps: list[str]
+      - flow_diagram: str
+      - migration_notes: list[str]
     """
     if isinstance(result, dict):
         return {
@@ -67,11 +100,15 @@ def normalize_result(result: Any) -> Dict[str, Any]:
         items = list(result)
         while len(items) < 4:
             items.append([])
+
+        steps = items[1] if isinstance(items[1], list) else ([str(items[1])] if items[1] else [])
+        notes = items[3] if isinstance(items[3], list) else ([str(items[3])] if items[3] else [])
+
         return {
             "summary": str(items[0]),
-            "tableau_steps": items[1] if isinstance(items[1], list) else [str(items[1])] if items[1] else [],
+            "tableau_steps": steps,
             "flow_diagram": str(items[2]),
-            "migration_notes": items[3] if isinstance(items[3], list) else [str(items[3])] if items[3] else [],
+            "migration_notes": notes,
         }
 
     return {
@@ -137,15 +174,15 @@ if convert_clicked:
 
             except ModuleNotFoundError as exc:
                 st.error(
-                    "Could not import the converter module. "
-                    "Make sure app/services/converter.py exists and the app folder is a Python package."
+                    "Could not import app.services.converter. "
+                    "Check that app/__init__.py and app/services/__init__.py exist, "
+                    "and that converter.py is inside app/services/."
                 )
                 st.exception(exc)
 
             except AttributeError as exc:
                 st.error(
-                    "Converter function not found in app/services/converter.py. "
-                    "Rename the function or add one of the supported names in the code."
+                    "No suitable converter function was found inside app.services.converter."
                 )
                 st.exception(exc)
 
