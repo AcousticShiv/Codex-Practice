@@ -189,3 +189,12 @@ if convert_clicked:
             except Exception as exc:
                 st.error(f"Conversion failed: {exc}")
                 st.exception(exc)
+
+st.markdown(
+    """
+    <div style='position: fixed; bottom: 10px; left: 15px; font-size: 14px; color: gray; z-index: 100;'>
+        ❤️ Developed by Shiv
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
