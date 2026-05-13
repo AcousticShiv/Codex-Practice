@@ -4,6 +4,10 @@ import re
 from typing import Any, Dict, List, Tuple
 
 
+# -----------------------------
+# Helpers
+# -----------------------------
+
 _COMMENT_RE = re.compile(r"//.*?$", re.MULTILINE)
 _STEP_START_RE = re.compile(r'^(#?"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)\s*=')
 
@@ -282,10 +286,18 @@ def _parse_expand_table_column(expr: str) -> Dict[str, Any]:
     return info
 
 
+def _clean_replace_literal(token: str) -> str:
+    token = token.strip()
+    if token.startswith('"') and token.endswith('"'):
+        return token[1:-1]
+    return token
+
+
 def _parse_replace_value_info(expr: str) -> Dict[str, Any]:
     """
     Example:
       Table.ReplaceValue(#"Changed Type1","X","1",Replacer.ReplaceText,{"Order_Block", ...})
+      Table.ReplaceValue(#"Expanded Material Group Sort",null,99,Replacer.ReplaceValue,{"group.Sort"})
     """
     args = _get_call_args(expr, "Table.ReplaceValue")
     info: Dict[str, Any] = {
@@ -295,25 +307,85 @@ def _parse_replace_value_info(expr: str) -> Dict[str, Any]:
         "replacement_kind": "",
     }
 
+    # Main parsing path
     if len(args) >= 5:
-     info["old_value"] = args[1].strip()
-     info["new_value"] = args[2].strip()
-     info["replacement_kind"] = _normalize_ref(args[3])
-     info["columns"] = _extract_quoted_strings(args[4])
-    return info
+        info["old_value"] = _clean_replace_literal(args[1])
+        info["new_value"] = _clean_replace_literal(args[2])
+        info["replacement_kind"] = _normalize_ref(args[3])
+        info["columns"] = _extract_quoted_strings(args[4])
+        return info
 
-    # Fallback: use first two quoted values as old/new, last brace list as columns
-    quoted = _extract_quoted_strings(expr)
-    if quoted:
-        if len(quoted) >= 1:
-            info["old_value"] = quoted[0]
-        if len(quoted) >= 2:
-            info["new_value"] = quoted[1]
+    # Fallback parser
+    m = re.search(
+        r"Table\.ReplaceValue\s*\((.*)\)\s*$",
+        expr,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return info
 
-    start = expr.rfind("{")
-    end = expr.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        info["columns"] = _extract_quoted_strings(expr[start : end + 1])
+    raw = m.group(1)
+    args2: List[str] = []
+    buf: List[str] = []
+    depth_paren = 0
+    depth_brace = 0
+    depth_bracket = 0
+    in_string = False
+
+    i = 0
+    while i < len(raw):
+        ch = raw[i]
+        nxt = raw[i + 1] if i + 1 < len(raw) else ""
+
+        if ch == '"':
+            if in_string and nxt == '"':
+                buf.append(ch)
+                buf.append(nxt)
+                i += 2
+                continue
+            in_string = not in_string
+            buf.append(ch)
+            i += 1
+            continue
+
+        if not in_string:
+            if ch == "(":
+                depth_paren += 1
+            elif ch == ")":
+                depth_paren = max(0, depth_paren - 1)
+            elif ch == "{":
+                depth_brace += 1
+            elif ch == "}":
+                depth_brace = max(0, depth_brace - 1)
+            elif ch == "[":
+                depth_bracket += 1
+            elif ch == "]":
+                depth_bracket = max(0, depth_bracket - 1)
+            elif (
+                ch == ","
+                and depth_paren == 0
+                and depth_brace == 0
+                and depth_bracket == 0
+            ):
+                part = "".join(buf).strip()
+                if part:
+                    args2.append(part)
+                buf = []
+                i += 1
+                continue
+
+        buf.append(ch)
+        i += 1
+
+    tail = "".join(buf).strip()
+    if tail:
+        args2.append(tail)
+
+    if len(args2) >= 5:
+        info["old_value"] = _clean_replace_literal(args2[1])
+        info["new_value"] = _clean_replace_literal(args2[2])
+        info["replacement_kind"] = _normalize_ref(args2[3])
+        info["columns"] = _extract_quoted_strings(args2[4])
 
     return info
 
@@ -341,6 +413,10 @@ def _parse_pivot_info(expr: str) -> Dict[str, Any]:
 
     return {"pivot_values": [], "pivot_col": ""}
 
+
+# -----------------------------
+# Output builders
+# -----------------------------
 
 def _build_summary(operations: List[Dict[str, str]]) -> str:
     if not operations:
@@ -399,6 +475,8 @@ def _build_tableau_steps(operations: List[Dict[str, str]]) -> List[str]:
             tableau_hint = "In Tableau Prep, use a Pivot step."
         elif op["type"] == "Unpivot":
             tableau_hint = "In Tableau Prep, reshape columns into rows with a Pivot-style transformation."
+        elif op["type"] == "Remove Errors":
+            tableau_hint = "In Tableau Prep, filter out error rows in a Clean step."
         else:
             tableau_hint = "Map this step manually in Tableau Prep."
 
@@ -454,6 +532,10 @@ def _build_notes(operations: List[Dict[str, str]], code: str) -> List[str]:
     return notes or ["This script is a good candidate for a straightforward Tableau Prep recreation."]
 
 
+# -----------------------------
+# Detection engine
+# -----------------------------
+
 def _detect_operations(code: str) -> List[Dict[str, str]]:
     blocks = _split_step_blocks(code)
     operations: List[Dict[str, str]] = []
@@ -464,115 +546,76 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
         expr_low = expr.lower()
 
         if "excel.workbook" in expr_low:
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Source",
-                    "description": "Connect to an Excel workbook source.",
-                }
-            )
+            operations.append({
+                "step": step_name,
+                "type": "Source",
+                "description": "Connect to an Excel workbook source.",
+            })
             continue
 
         if "csv.document" in expr_low:
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Source",
-                    "description": "Connect to a CSV / flat file source.",
-                }
-            )
+            operations.append({
+                "step": step_name,
+                "type": "Source",
+                "description": "Connect to a CSV / flat file source.",
+            })
             continue
 
         if "sql.database" in expr_low:
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Source",
-                    "description": "Connect to a SQL database and read the source query/table.",
-                }
-            )
+            operations.append({
+                "step": step_name,
+                "type": "Source",
+                "description": "Connect to a SQL database and read the source query/table.",
+            })
             continue
 
         if "table.removecolumns" in expr_low:
             removed_cols = _parse_remove_columns(expr)
             desc = f"Remove column(s): {', '.join(removed_cols)}." if removed_cols else "Remove one or more columns."
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Remove Columns",
-                    "description": desc,
-                }
-            )
+            operations.append({"step": step_name, "type": "Remove Columns", "description": desc})
             continue
 
         if "table.selectrows" in expr_low:
             if re.search(r"\beach\s+true\b", expr_low, re.IGNORECASE):
                 continue
-
             cond_match = re.search(r"each\s+(.+?)(?:\)\s*,?\s*$|\)\s*in\s*$)", expr, re.IGNORECASE)
             condition = cond_match.group(1).strip() if cond_match else "custom condition"
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Filter",
-                    "description": f"Filter rows using condition: {condition}.",
-                }
-            )
+            operations.append({
+                "step": step_name,
+                "type": "Filter",
+                "description": f"Filter rows using condition: {condition}.",
+            })
             continue
 
         if "table.transformcolumntypes" in expr_low:
             pairs = _parse_type_conversions(expr)
             if pairs:
-                parts = []
-                for col_name, raw_type in pairs:
-                    friendly = _friendly_type_name(raw_type)
-                    parts.append(f"{col_name} → {friendly}")
+                parts = [f"{col} → {_friendly_type_name(raw)}" for col, raw in pairs]
                 desc = "Change data type: " + "; ".join(parts) + "."
             else:
                 desc = "Change column data types."
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Change Types",
-                    "description": desc,
-                }
-            )
+            operations.append({"step": step_name, "type": "Change Types", "description": desc})
             continue
 
         if "table.renamecolumns" in expr_low:
             pairs = _parse_rename_pairs(expr)
-            desc = "Rename column(s): " + "; ".join(f"{old} → {new}" for old, new in pairs) + "." if pairs else "Rename columns."
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Rename",
-                    "description": desc,
-                }
+            desc = (
+                "Rename column(s): " + "; ".join(f"{old} → {new}" for old, new in pairs) + "."
+                if pairs else "Rename columns."
             )
+            operations.append({"step": step_name, "type": "Rename", "description": desc})
             continue
 
         if "table.addcolumn" in expr_low:
             new_col = _parse_add_column_name(expr)
             desc = f"Add calculated column: {new_col}." if new_col else "Add a calculated column."
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Add Column",
-                    "description": desc,
-                }
-            )
+            operations.append({"step": step_name, "type": "Add Column", "description": desc})
             continue
 
         if "table.group" in expr_low:
             keys = _parse_group_keys(expr)
             desc = "Group by: " + ", ".join(keys) + "." if keys else "Group rows and aggregate data."
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Group",
-                    "description": desc,
-                }
-            )
+            operations.append({"step": step_name, "type": "Group", "description": desc})
             continue
 
         if "table.nestedjoin" in expr_low:
@@ -591,14 +634,7 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
                 desc = f"Join with lookup table '{right_table}'."
             else:
                 desc = "Join tables using a merge operation."
-
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Join",
-                    "description": desc,
-                }
-            )
+            operations.append({"step": step_name, "type": "Join", "description": desc})
             continue
 
         if "table.expandtablecolumn" in expr_low:
@@ -615,34 +651,19 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
                     desc = f"Expand '{nested_column}' to fields: {', '.join(expanded_cols)}."
             else:
                 desc = "Expand joined table columns."
-
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Expand",
-                    "description": desc,
-                }
-            )
+            operations.append({"step": step_name, "type": "Expand", "description": desc})
             continue
 
         if "table.sort" in expr_low:
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Sort",
-                    "description": "Sort rows.",
-                }
-            )
+            operations.append({"step": step_name, "type": "Sort", "description": "Sort rows."})
             continue
 
         if "table.distinct" in expr_low:
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Deduplicate",
-                    "description": "Remove duplicate rows.",
-                }
-            )
+            operations.append({"step": step_name, "type": "Deduplicate", "description": "Remove duplicate rows."})
+            continue
+
+        if "table.removerowswitherrors" in expr_low:
+            operations.append({"step": step_name, "type": "Remove Errors", "description": "Remove rows with errors."})
             continue
 
         if "table.replacevalue" in expr_low:
@@ -661,52 +682,36 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
                     desc = f"Replace {old_value or 'value'} with {new_value or 'value'}."
                 else:
                     desc = "Replace values in selected columns."
-
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Replace Values",
-                    "description": desc,
-                }
-            )
+            operations.append({"step": step_name, "type": "Replace Values", "description": desc})
             continue
 
         if "table.transformcolumns" in expr_low and "text.proper" in expr_low:
             fields = _parse_transformcolumns_proper_fields(expr)
-            desc = f"Apply proper-case formatting to {', '.join(fields)}." if fields else "Apply proper-case formatting to selected text columns."
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Capitalize Text",
-                    "description": desc,
-                }
+            desc = (
+                f"Apply proper-case formatting to {', '.join(fields)}."
+                if fields else "Apply proper-case formatting to selected text columns."
             )
+            operations.append({"step": step_name, "type": "Capitalize Text", "description": desc})
             continue
 
         if "table.unpivotothercolumns" in expr_low:
             info = _parse_unpivot_info(expr)
             kept = info.get("kept_columns", []) or []
-            desc = f"Unpivot all other columns, keeping {', '.join(kept)}." if kept else "Unpivot other columns into attribute/value rows."
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Unpivot",
-                    "description": desc,
-                }
+            desc = (
+                f"Unpivot all other columns, keeping {', '.join(kept)}."
+                if kept else "Unpivot other columns into attribute/value rows."
             )
+            operations.append({"step": step_name, "type": "Unpivot", "description": desc})
             continue
 
         if "table.unpivot" in expr_low:
             info = _parse_unpivot_info(expr)
             cols = info.get("cols", []) or []
-            desc = f"Unpivot columns: {', '.join(cols)}." if cols else "Unpivot columns into attribute/value rows."
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Unpivot",
-                    "description": desc,
-                }
+            desc = (
+                f"Unpivot columns: {', '.join(cols)}."
+                if cols else "Unpivot columns into attribute/value rows."
             )
+            operations.append({"step": step_name, "type": "Unpivot", "description": desc})
             continue
 
         if "table.pivot" in expr_low:
@@ -720,27 +725,22 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
                 desc = f"Pivot values: {', '.join(pivot_values)}."
             else:
                 desc = "Pivot data to reshape rows into columns."
-
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Pivot",
-                    "description": desc,
-                }
-            )
+            operations.append({"step": step_name, "type": "Pivot", "description": desc})
             continue
 
         if any(token in expr_low for token in ("text.", "date.", "number.", "list.", "record.", "table.")):
-            operations.append(
-                {
-                    "step": step_name,
-                    "type": "Custom",
-                    "description": f"Custom Power Query transformation: {expr[:180]}",
-                }
-            )
+            operations.append({
+                "step": step_name,
+                "type": "Custom",
+                "description": f"Custom Power Query transformation: {expr[:180]}",
+            })
 
     return operations
 
+
+# -----------------------------
+# Public API
+# -----------------------------
 
 def convert_m_code(m_code: str) -> Dict[str, Any]:
     """
@@ -758,6 +758,7 @@ def convert_m_code(m_code: str) -> Dict[str, Any]:
     }
 
 
+# Backward-compatible aliases
 convert = convert_m_code
 generate_conversion = convert_m_code
 process_m_code = convert_m_code
