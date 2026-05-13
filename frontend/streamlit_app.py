@@ -98,6 +98,7 @@ def format_tableau_steps(steps: List[str]) -> str:
                 split_parts = step.split(". In Tableau Prep", 1)
 
                 datatype_part = split_parts[0]
+
                 guidance = (
                     "\n\nIn Tableau Prep"
                     + split_parts[1]
@@ -120,7 +121,14 @@ def format_tableau_steps(steps: List[str]) -> str:
             pretty_step = "Change data types:\n\n"
 
             for col in columns:
-                pretty_step += f"    • {col}\n"
+
+                clean_col = col
+
+                # Remove leaked numbering like "6. "
+                if ". " in clean_col[:5]:
+                    clean_col = clean_col.split(". ", 1)[1]
+
+                pretty_step += f"    • {clean_col}\n"
 
             pretty_step += guidance
 
