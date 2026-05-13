@@ -187,10 +187,6 @@ def _dedupe_nonempty(items: List[str]) -> List[str]:
 
 
 def _parse_remove_columns(expr: str) -> List[str]:
-    """
-    Example:
-      Table.RemoveColumns(Source,{"BSART","VENDOR_ID"})
-    """
     args = _get_call_args(expr, "Table.RemoveColumns")
     if len(args) >= 2:
         cols = _extract_quoted_strings(args[1])
@@ -201,10 +197,6 @@ def _parse_remove_columns(expr: str) -> List[str]:
 
 
 def _parse_type_conversions(expr: str) -> List[Tuple[str, str]]:
-    """
-    Example:
-      Table.TransformColumnTypes(Source,{{"A", type date}, {"B", Int64.Type}})
-    """
     pairs = re.findall(r'\{\s*"([^"]+)"\s*,\s*([^{}]+?)\s*\}', expr)
     return [(col.strip(), raw_type.strip()) for col, raw_type in pairs]
 
@@ -220,10 +212,6 @@ def _parse_rename_pairs(expr: str) -> List[Tuple[str, str]]:
 
 
 def _parse_transformcolumns_proper_fields(expr: str) -> List[str]:
-    """
-    Example:
-      Table.TransformColumns(Source,{{"ORT01", Text.Proper, type text}, {"CustomerName", Text.Proper, type text}})
-    """
     args = _get_call_args(expr, "Table.TransformColumns")
     target_expr = args[1] if len(args) >= 2 else expr
     fields = re.findall(r'\{\s*"([^"]+)"\s*,\s*Text\.Proper\b', target_expr, re.IGNORECASE)
@@ -248,9 +236,9 @@ def _parse_group_keys(expr: str) -> List[str]:
     return []
 
 
-def _parse_nested_join(expr: str) -> Dict[str, List[str] | str]:
+def _parse_nested_join(expr: str) -> Dict[str, Any]:
     args = _get_call_args(expr, "Table.NestedJoin")
-    info: Dict[str, List[str] | str] = {
+    info: Dict[str, Any] = {
         "left_table": "",
         "right_table": "",
         "left_keys": [],
@@ -272,9 +260,9 @@ def _parse_nested_join(expr: str) -> Dict[str, List[str] | str]:
     return info
 
 
-def _parse_expand_table_column(expr: str) -> Dict[str, List[str] | str]:
+def _parse_expand_table_column(expr: str) -> Dict[str, Any]:
     args = _get_call_args(expr, "Table.ExpandTableColumn")
-    info: Dict[str, List[str] | str] = {
+    info: Dict[str, Any] = {
         "source_table": "",
         "nested_column": "",
         "expanded_cols": [],
@@ -294,24 +282,40 @@ def _parse_expand_table_column(expr: str) -> Dict[str, List[str] | str]:
     return info
 
 
-def _parse_replace_value_columns(expr: str) -> List[str]:
+def _parse_replace_value_info(expr: str) -> Dict[str, Any]:
     """
     Example:
       Table.ReplaceValue(#"Changed Type1","X","1",Replacer.ReplaceText,{"Order_Block", ...})
     """
     args = _get_call_args(expr, "Table.ReplaceValue")
-    if len(args) >= 5:
-        cols = _extract_quoted_strings(args[4])
-        return _dedupe_nonempty(cols)
+    info: Dict[str, Any] = {
+        "old_value": "",
+        "new_value": "",
+        "columns": [],
+        "replacement_kind": "",
+    }
 
-    # Fallback: last brace list inside the expression
+    if len(args) >= 5:
+        info["old_value"] = _normalize_ref(args[1])
+        info["new_value"] = _normalize_ref(args[2])
+        info["replacement_kind"] = _normalize_ref(args[3])
+        info["columns"] = _extract_quoted_strings(args[4])
+        return info
+
+    # Fallback: use first two quoted values as old/new, last brace list as columns
+    quoted = _extract_quoted_strings(expr)
+    if quoted:
+        if len(quoted) >= 1:
+            info["old_value"] = quoted[0]
+        if len(quoted) >= 2:
+            info["new_value"] = quoted[1]
+
     start = expr.rfind("{")
     end = expr.rfind("}")
     if start != -1 and end != -1 and end > start:
-        cols = _extract_quoted_strings(expr[start : end + 1])
-        return _dedupe_nonempty(cols)
+        info["columns"] = _extract_quoted_strings(expr[start : end + 1])
 
-    return []
+    return info
 
 
 def _parse_unpivot_info(expr: str) -> Dict[str, Any]:
@@ -491,10 +495,7 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
 
         if "table.removecolumns" in expr_low:
             removed_cols = _parse_remove_columns(expr)
-            if removed_cols:
-                desc = f"Remove column(s): {', '.join(removed_cols)}."
-            else:
-                desc = "Remove one or more columns."
+            desc = f"Remove column(s): {', '.join(removed_cols)}." if removed_cols else "Remove one or more columns."
             operations.append(
                 {
                     "step": step_name,
@@ -540,10 +541,7 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
 
         if "table.renamecolumns" in expr_low:
             pairs = _parse_rename_pairs(expr)
-            if pairs:
-                desc = "Rename column(s): " + "; ".join(f"{old} → {new}" for old, new in pairs) + "."
-            else:
-                desc = "Rename columns."
+            desc = "Rename column(s): " + "; ".join(f"{old} → {new}" for old, new in pairs) + "." if pairs else "Rename columns."
             operations.append(
                 {
                     "step": step_name,
@@ -567,10 +565,7 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
 
         if "table.group" in expr_low:
             keys = _parse_group_keys(expr)
-            if keys:
-                desc = "Group by: " + ", ".join(keys) + "."
-            else:
-                desc = "Group rows and aggregate data."
+            desc = "Group by: " + ", ".join(keys) + "." if keys else "Group rows and aggregate data."
             operations.append(
                 {
                     "step": step_name,
@@ -651,11 +646,21 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
             continue
 
         if "table.replacevalue" in expr_low:
-            target_cols = _parse_replace_value_columns(expr)
-            if target_cols:
-                desc = f"Replace values in columns: {', '.join(target_cols)}."
+            info = _parse_replace_value_info(expr)
+            columns = info.get("columns", []) or []
+            old_value = str(info.get("old_value", "")).strip()
+            new_value = str(info.get("new_value", "")).strip()
+
+            if columns:
+                if old_value or new_value:
+                    desc = f"Replace {old_value or 'value'} with {new_value or 'value'} in columns: {', '.join(columns)}."
+                else:
+                    desc = f"Replace values in columns: {', '.join(columns)}."
             else:
-                desc = "Replace values in selected columns."
+                if old_value or new_value:
+                    desc = f"Replace {old_value or 'value'} with {new_value or 'value'}."
+                else:
+                    desc = "Replace values in selected columns."
 
             operations.append(
                 {
@@ -668,11 +673,7 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
 
         if "table.transformcolumns" in expr_low and "text.proper" in expr_low:
             fields = _parse_transformcolumns_proper_fields(expr)
-            if fields:
-                desc = f"Apply proper-case formatting to {', '.join(fields)}."
-            else:
-                desc = "Apply proper-case formatting to selected text columns."
-
+            desc = f"Apply proper-case formatting to {', '.join(fields)}." if fields else "Apply proper-case formatting to selected text columns."
             operations.append(
                 {
                     "step": step_name,
@@ -685,11 +686,7 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
         if "table.unpivotothercolumns" in expr_low:
             info = _parse_unpivot_info(expr)
             kept = info.get("kept_columns", []) or []
-            if kept:
-                desc = f"Unpivot all other columns, keeping {', '.join(kept)}."
-            else:
-                desc = "Unpivot other columns into attribute/value rows."
-
+            desc = f"Unpivot all other columns, keeping {', '.join(kept)}." if kept else "Unpivot other columns into attribute/value rows."
             operations.append(
                 {
                     "step": step_name,
@@ -702,11 +699,7 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
         if "table.unpivot" in expr_low:
             info = _parse_unpivot_info(expr)
             cols = info.get("cols", []) or []
-            if cols:
-                desc = f"Unpivot columns: {', '.join(cols)}."
-            else:
-                desc = "Unpivot columns into attribute/value rows."
-
+            desc = f"Unpivot columns: {', '.join(cols)}." if cols else "Unpivot columns into attribute/value rows."
             operations.append(
                 {
                     "step": step_name,
@@ -765,7 +758,6 @@ def convert_m_code(m_code: str) -> Dict[str, Any]:
     }
 
 
-# Backward-compatible aliases
 convert = convert_m_code
 generate_conversion = convert_m_code
 process_m_code = convert_m_code
