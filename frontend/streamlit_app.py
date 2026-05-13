@@ -263,8 +263,8 @@ with col2:
 # -----------------------------
 
 if clear_clicked:
-    st.session_state.m_code = ""
     st.session_state.conversion_data = None
+    del st.session_state["m_code"]
     st.rerun()
 
 
