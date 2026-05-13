@@ -297,9 +297,14 @@ def _parse_replace_value_info(expr: str) -> Dict[str, Any]:
     """
     Example:
       Table.ReplaceValue(#"Changed Type1","X","1",Replacer.ReplaceText,{"Order_Block", ...})
-      Table.ReplaceValue(#"Expanded Material Group Sort",null,99,Replacer.ReplaceValue,{"group.Sort"})
+      Table.ReplaceValue(
+          #"Expanded Material Group Sort",
+          null,
+          99,
+          Replacer.ReplaceValue,
+          {"group.Sort"}
+      )
     """
-    args = _get_call_args(expr, "Table.ReplaceValue")
     info: Dict[str, Any] = {
         "old_value": "",
         "new_value": "",
@@ -307,7 +312,8 @@ def _parse_replace_value_info(expr: str) -> Dict[str, Any]:
         "replacement_kind": "",
     }
 
-    # Main parsing path
+    # Primary parser path
+    args = _get_call_args(expr, "Table.ReplaceValue")
     if len(args) >= 5:
         info["old_value"] = _clean_replace_literal(args[1])
         info["new_value"] = _clean_replace_literal(args[2])
@@ -315,77 +321,31 @@ def _parse_replace_value_info(expr: str) -> Dict[str, Any]:
         info["columns"] = _extract_quoted_strings(args[4])
         return info
 
-    # Fallback parser
+    # Dedicated fallback for:
+    # Table.ReplaceValue(..., null, 99, Replacer.ReplaceValue, {"group.Sort"})
     m = re.search(
-        r"Table\.ReplaceValue\s*\((.*)\)\s*$",
+        r'''
+        Table\.ReplaceValue
+        \s*\(
+            .*?
+            \s*,\s*
+            (null|true|false|-?\d+|".*?")
+            \s*,\s*
+            (null|true|false|-?\d+|".*?")
+            \s*,\s*
+            ([^,]+)
+            \s*,\s*
+            \{(.*?)\}
+        \s*\)
+        ''',
         expr,
-        re.IGNORECASE | re.DOTALL,
+        re.IGNORECASE | re.DOTALL | re.VERBOSE,
     )
-    if not m:
-        return info
-
-    raw = m.group(1)
-    args2: List[str] = []
-    buf: List[str] = []
-    depth_paren = 0
-    depth_brace = 0
-    depth_bracket = 0
-    in_string = False
-
-    i = 0
-    while i < len(raw):
-        ch = raw[i]
-        nxt = raw[i + 1] if i + 1 < len(raw) else ""
-
-        if ch == '"':
-            if in_string and nxt == '"':
-                buf.append(ch)
-                buf.append(nxt)
-                i += 2
-                continue
-            in_string = not in_string
-            buf.append(ch)
-            i += 1
-            continue
-
-        if not in_string:
-            if ch == "(":
-                depth_paren += 1
-            elif ch == ")":
-                depth_paren = max(0, depth_paren - 1)
-            elif ch == "{":
-                depth_brace += 1
-            elif ch == "}":
-                depth_brace = max(0, depth_brace - 1)
-            elif ch == "[":
-                depth_bracket += 1
-            elif ch == "]":
-                depth_bracket = max(0, depth_bracket - 1)
-            elif (
-                ch == ","
-                and depth_paren == 0
-                and depth_brace == 0
-                and depth_bracket == 0
-            ):
-                part = "".join(buf).strip()
-                if part:
-                    args2.append(part)
-                buf = []
-                i += 1
-                continue
-
-        buf.append(ch)
-        i += 1
-
-    tail = "".join(buf).strip()
-    if tail:
-        args2.append(tail)
-
-    if len(args2) >= 5:
-        info["old_value"] = _clean_replace_literal(args2[1])
-        info["new_value"] = _clean_replace_literal(args2[2])
-        info["replacement_kind"] = _normalize_ref(args2[3])
-        info["columns"] = _extract_quoted_strings(args2[4])
+    if m:
+        info["old_value"] = _clean_replace_literal(m.group(1))
+        info["new_value"] = _clean_replace_literal(m.group(2))
+        info["replacement_kind"] = m.group(3).strip()
+        info["columns"] = _extract_quoted_strings("{" + m.group(4) + "}")
 
     return info
 
