@@ -17,37 +17,55 @@ if str(PROJECT_ROOT) not in sys.path:
 # Visual flow builder
 # -----------------------------
 
-def build_visual_flow(flow_text: str) -> str:
+def build_visual_flow_vertical(flow_text: str) -> str:
     """
-    Convert compact flow text into a beginner-friendly visual flow.
+    Render flow as stacked boxes with downward arrows.
 
-    Example input:  Input -> Filter -> Change Types -> Join -> Output
-    Example output:
-        ┌─────────────────────┐
-        │        Input        │
-        └─────────────────────┘
-                 ↓
-        ┌─────────────────────┐
-        │       Filter        │
-        └─────────────────────┘
-        ...
+    Example:
+        ┌───────────────────────┐
+        │         Input         │
+        └───────────────────────┘
+                    ↓
+        ┌───────────────────────┐
+        │         Filter        │
+        └───────────────────────┘
     """
-    nodes = [node.strip() for node in flow_text.split("->") if node.strip()]
+    nodes = [n.strip() for n in flow_text.split("->") if n.strip()]
     if not nodes:
         return "No flow detected."
 
+    width = max(19, max(len(n) for n in nodes) + 4)
+    border  = "┌" + "─" * (width + 2) + "┐"
+    divider = "└" + "─" * (width + 2) + "┘"
+    indent  = " " * ((width // 2) + 2)
+
     visual: List[str] = []
     for i, node in enumerate(nodes):
-        box = (
-            "┌─────────────────────┐\n"
-            f"│ {node.center(19)} │\n"
-            "└─────────────────────┘"
-        )
-        visual.append(box)
+        visual.append(f"{border}\n│ {node.center(width)} │\n{divider}")
         if i != len(nodes) - 1:
-            visual.append("          ↓")
+            visual.append(f"{indent}↓")
 
     return "\n".join(visual)
+
+
+def build_visual_flow_horizontal(flow_text: str) -> str:
+    """
+    Render flow as a single left-to-right line.
+
+    Example:
+        [ Input ]  →  [ Filter ]  →  [ Change Types ]  →  [ Output ]
+    """
+    nodes = [n.strip() for n in flow_text.split("->") if n.strip()]
+    if not nodes:
+        return "No flow detected."
+
+    parts = []
+    for i, node in enumerate(nodes):
+        parts.append(f"[ {node} ]")
+        if i != len(nodes) - 1:
+            parts.append("→")
+
+    return "  ".join(parts)
 
 
 # -----------------------------
@@ -210,8 +228,16 @@ if convert_clicked:
                 # 3) Visual Flow
                 st.subheader("3) Tableau Prep Style Flow")
                 if data["flow_diagram"]:
-                    visual_flow = build_visual_flow(data["flow_diagram"])
-                    st.code(visual_flow, language="text")
+                    layout = st.radio(
+                        "Layout",
+                        ["Vertical", "Horizontal"],
+                        horizontal=True,
+                        label_visibility="collapsed",
+                    )
+                    if layout == "Vertical":
+                        st.code(build_visual_flow_vertical(data["flow_diagram"]), language="text")
+                    else:
+                        st.code(build_visual_flow_horizontal(data["flow_diagram"]), language="text")
                 else:
                     st.info("No flow diagram returned.")
 
