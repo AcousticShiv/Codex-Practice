@@ -18,7 +18,6 @@ if str(PROJECT_ROOT) not in sys.path:
 # Visual flow builder
 # -----------------------------
 
-
 def build_visual_flow_vertical(flow_text: str) -> str:
     """
     Render flow as stacked boxes with downward arrows.
@@ -51,7 +50,6 @@ def build_visual_flow_vertical(flow_text: str) -> str:
     return "\n".join(visual)
 
 
-
 def build_visual_flow_horizontal(flow_text: str) -> str:
     """
     Render flow as a single left-to-right line.
@@ -78,7 +76,6 @@ def build_visual_flow_horizontal(flow_text: str) -> str:
 # Step formatting helper
 # -----------------------------
 
-
 def format_tableau_steps(steps: List[str]) -> str:
     """
     Improve readability and consistency for parser output.
@@ -94,10 +91,11 @@ def format_tableau_steps(steps: List[str]) -> str:
 
         clean_step = step.strip()
 
+        # Improve ReplaceValue wording
         if "Replace IIL with value" in clean_step:
             clean_step = clean_step.replace(
                 "Replace IIL with value",
-                "Remove text 'IIL ' from"
+                "Remove text 'IIL ' from columns"
             )
 
         if "Replace '' with value" in clean_step:
@@ -106,6 +104,7 @@ def format_tableau_steps(steps: List[str]) -> str:
                 "Replace blank value with"
             )
 
+        # Format long datatype conversions
         if (
             "Change data type:" in clean_step
             and clean_step.count(";") >= 2
@@ -114,6 +113,7 @@ def format_tableau_steps(steps: List[str]) -> str:
             guidance = ""
             step_number = ""
 
+            # Extract step number like "6."
             if ". " in clean_step[:5]:
                 step_number = clean_step.split(". ", 1)[0] + ". "
 
@@ -156,6 +156,7 @@ def format_tableau_steps(steps: List[str]) -> str:
 
                 clean_col = col
 
+                # Remove leaked numbering like "6. "
                 if ". " in clean_col[:5]:
                     clean_col = clean_col.split(". ", 1)[1]
 
@@ -191,10 +192,12 @@ st.caption(
 # Converter loader
 # -----------------------------
 
-
 def _candidate_converter_functions(
     module: Any
 ) -> List[Callable[[str], Any]]:
+    """
+    Return likely converter functions from app.services.converter.
+    """
 
     preferred_names = [
         "convert_m_code",
@@ -218,6 +221,7 @@ def _candidate_converter_functions(
     if funcs:
         return funcs
 
+    # Fallback search
     for name in dir(module):
 
         if name.startswith("_"):
@@ -253,15 +257,16 @@ def get_converter() -> Callable[[str], Any]:
     if not funcs:
 
         raise AttributeError(
-            "No converter function found in "
-            "app.services.converter."
+            "No converter function found in app.services.converter."
         )
 
     return funcs[0]
 
 
-
 def normalize_result(result: Any) -> Dict[str, Any]:
+    """
+    Normalize converter output into UI format.
+    """
 
     if isinstance(result, dict):
 
@@ -345,27 +350,31 @@ if "m_code" not in st.session_state:
 # -----------------------------
 
 st.caption(
-    "Supports full Power Query M scripts "
-    "or partial transformation snippets."
+    "Supports full Power Query M scripts or partial transformation snippets."
 )
 
 st.text_area(
     "Paste Power Query M code",
     key="m_code",
     height=320,
+    placeholder=(
+        "let\n"
+        "    Source = ...\n"
+        "in\n"
+        "    Result\n\n"
+        "(Partial M snippets also supported)"
+    ),
 )
 
 col1, col2 = st.columns([1, 1])
 
 with col1:
-
     convert_clicked = st.button(
         "Convert",
         use_container_width=True
     )
 
 with col2:
-
     clear_clicked = st.button(
         "Clear & Convert New",
         use_container_width=True
@@ -416,6 +425,26 @@ if convert_clicked:
                     normalize_result(raw_result)
                 )
 
+            except ModuleNotFoundError as exc:
+
+                st.error(
+                    "Could not import app.services.converter."
+                )
+
+                st.exception(exc)
+
+                st.session_state.conversion_data = None
+
+            except AttributeError as exc:
+
+                st.error(
+                    "No suitable converter function found."
+                )
+
+                st.exception(exc)
+
+                st.session_state.conversion_data = None
+
             except Exception as exc:
 
                 st.error(f"Conversion failed: {exc}")
@@ -433,12 +462,24 @@ if st.session_state.conversion_data is not None:
 
     data = st.session_state.conversion_data
 
+    # 1) Summary
     st.subheader("1) Transformation Summary")
 
     if data["summary"]:
         st.write(data["summary"])
+    else:
+        st.info("No summary returned.")
 
+    st.markdown("")
+
+    # 2) Tableau Steps
     st.subheader("2) Tableau Prep Step-by-Step")
+
+    step_count = len(data["tableau_steps"])
+
+    st.caption(
+        f"{step_count} transformation steps detected"
+    )
 
     if data["tableau_steps"]:
 
@@ -446,25 +487,84 @@ if st.session_state.conversion_data is not None:
             data["tableau_steps"]
         )
 
-        st.code(formatted_steps, language="text")
+        with st.expander(
+            "View Detailed Tableau Prep Steps",
+            expanded=False
+        ):
 
+            st.code(formatted_steps, language="text")
+
+            st.download_button(
+                "Download Steps (.txt)",
+                formatted_steps,
+                file_name="tableau_steps.txt",
+                mime="text/plain",
+            )
+
+            st.caption(
+                "Tip: Use the copy icon in the top-right corner of the code block to copy steps."
+            )
+
+    else:
+        st.info("No Tableau steps returned.")
+
+    st.markdown("")
+
+    # 3) Visual Flow
     st.subheader("3) Tableau Prep Style Flow")
 
     if data["flow_diagram"]:
 
-        st.code(
-            build_visual_flow_vertical(
-                data["flow_diagram"]
-            ),
-            language="text"
+        layout = st.radio(
+            "Layout",
+            ["Vertical", "Horizontal"],
+            horizontal=True,
+            label_visibility="collapsed",
         )
 
-    st.subheader("4) Migration Notes")
+        with st.expander(
+            "View Transformation Flow",
+            expanded=True
+        ):
+
+            if layout == "Vertical":
+
+                st.code(
+                    build_visual_flow_vertical(
+                        data["flow_diagram"]
+                    ),
+                    language="text"
+                )
+
+            else:
+
+                st.code(
+                    build_visual_flow_horizontal(
+                        data["flow_diagram"]
+                    ),
+                    language="text"
+                )
+
+    else:
+        st.info("No flow diagram returned.")
+
+    st.markdown("")
+
+    # 4) Migration Notes
+    st.subheader("4) Migration Notes & Limitations")
 
     if data["migration_notes"]:
 
-        for note in data["migration_notes"]:
-            st.markdown(f"- {note}")
+        with st.expander(
+            "View Migration Notes",
+            expanded=False
+        ):
+
+            for note in data["migration_notes"]:
+                st.markdown(f"- {note}")
+
+    else:
+        st.info("No migration notes returned.")
 
 
 # -----------------------------
@@ -472,4 +572,4 @@ if st.session_state.conversion_data is not None:
 # -----------------------------
 
 st.markdown("---")
-st.caption("Developed by Shiv")
+st.caption("❤️ Developed by Shiv")
