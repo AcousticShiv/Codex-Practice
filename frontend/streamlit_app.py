@@ -91,25 +91,42 @@ def format_tableau_steps(steps: List[str]) -> str:
             and step.count(";") >= 3
         ):
 
-            parts = step.split("Change data type:")
+            guidance = ""
 
-            if len(parts) > 1:
+            if ". In Tableau Prep" in step:
 
-                datatype_text = parts[1].strip()
+                split_parts = step.split(". In Tableau Prep", 1)
 
-                columns = [
-                    c.strip()
-                    for c in datatype_text.split(";")
-                    if c.strip()
-                ]
+                datatype_part = split_parts[0]
+                guidance = (
+                    "\n\nIn Tableau Prep"
+                    + split_parts[1]
+                )
 
-                pretty_step = "Change data types:\n"
+            else:
+                datatype_part = step
 
-                for col in columns:
-                    pretty_step += f"    • {col}\n"
+            datatype_text = datatype_part.replace(
+                "Change data type:",
+                ""
+            ).strip()
 
-                formatted_steps.append(pretty_step.strip())
-                continue
+            columns = [
+                c.strip()
+                for c in datatype_text.split(";")
+                if c.strip()
+            ]
+
+            pretty_step = "Change data types:\n\n"
+
+            for col in columns:
+                pretty_step += f"    • {col}\n"
+
+            pretty_step += guidance
+
+            formatted_steps.append(pretty_step.strip())
+
+            continue
 
         formatted_steps.append(step)
 
@@ -420,6 +437,8 @@ if st.session_state.conversion_data is not None:
     else:
         st.info("No summary returned.")
 
+    st.markdown("")
+
     # 2) Tableau Steps
     st.subheader("2) Tableau Prep Step-by-Step")
 
@@ -437,7 +456,7 @@ if st.session_state.conversion_data is not None:
 
         with st.expander(
             "View Detailed Tableau Prep Steps",
-            expanded=True
+            expanded=False
         ):
 
             st.code(formatted_steps, language="text")
@@ -449,8 +468,15 @@ if st.session_state.conversion_data is not None:
                 mime="text/plain",
             )
 
+            st.caption(
+                "Tip: Use the copy icon in the top-right "
+                "corner of the code block to copy steps."
+            )
+
     else:
         st.info("No Tableau steps returned.")
+
+    st.markdown("")
 
     # 3) Visual Flow
     st.subheader("3) Tableau Prep Style Flow")
@@ -489,6 +515,8 @@ if st.session_state.conversion_data is not None:
 
     else:
         st.info("No flow diagram returned.")
+
+    st.markdown("")
 
     # 4) Migration Notes
     st.subheader("4) Migration Notes & Limitations")
