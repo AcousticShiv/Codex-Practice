@@ -12,16 +12,61 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+
+# -----------------------------
+# Visual flow builder
+# -----------------------------
+
+def build_visual_flow(flow_text: str) -> str:
+    """
+    Convert compact flow text into a beginner-friendly visual flow.
+
+    Example input:  Input -> Filter -> Change Types -> Join -> Output
+    Example output:
+        ┌─────────────────────┐
+        │        Input        │
+        └─────────────────────┘
+                 ↓
+        ┌─────────────────────┐
+        │       Filter        │
+        └─────────────────────┘
+        ...
+    """
+    nodes = [node.strip() for node in flow_text.split("->") if node.strip()]
+    if not nodes:
+        return "No flow detected."
+
+    visual: List[str] = []
+    for i, node in enumerate(nodes):
+        box = (
+            "┌─────────────────────┐\n"
+            f"│ {node.center(19)} │\n"
+            "└─────────────────────┘"
+        )
+        visual.append(box)
+        if i != len(nodes) - 1:
+            visual.append("          ↓")
+
+    return "\n".join(visual)
+
+
+# -----------------------------
+# Page config
+# -----------------------------
+
 st.set_page_config(page_title="M → Tableau Prep Assistant", layout="wide")
 st.title("Power Query M → Tableau Prep Migration Assistant")
 st.caption("Runs fully inside Streamlit. No separate backend is required.")
 
 
+# -----------------------------
+# Converter loader
+# -----------------------------
+
 def _candidate_converter_functions(module: Any) -> List[Callable[[str], Any]]:
     """
     Return likely converter functions from app.services.converter.
-
-    This keeps the app resilient even if the function name changes slightly.
+    Resilient to function renames.
     """
     preferred_names = [
         "convert_m_code",
@@ -34,7 +79,6 @@ def _candidate_converter_functions(module: Any) -> List[Callable[[str], Any]]:
     ]
 
     funcs: List[Callable[[str], Any]] = []
-
     for name in preferred_names:
         fn = getattr(module, name, None)
         if callable(fn):
@@ -43,7 +87,7 @@ def _candidate_converter_functions(module: Any) -> List[Callable[[str], Any]]:
     if funcs:
         return funcs
 
-    # Fallback: pick any public callable with a converter-like name
+    # Fallback: any public callable with a converter-like name
     for name in dir(module):
         if name.startswith("_"):
             continue
@@ -100,10 +144,8 @@ def normalize_result(result: Any) -> Dict[str, Any]:
         items = list(result)
         while len(items) < 4:
             items.append([])
-
         steps = items[1] if isinstance(items[1], list) else ([str(items[1])] if items[1] else [])
         notes = items[3] if isinstance(items[3], list) else ([str(items[3])] if items[3] else [])
-
         return {
             "summary": str(items[0]),
             "tableau_steps": steps,
@@ -118,6 +160,10 @@ def normalize_result(result: Any) -> Dict[str, Any]:
         "migration_notes": [],
     }
 
+
+# -----------------------------
+# UI
+# -----------------------------
 
 m_code = st.text_area(
     "Paste Power Query M code",
@@ -137,12 +183,14 @@ if convert_clicked:
                 raw_result = converter(m_code)
                 data = normalize_result(raw_result)
 
+                # 1) Summary
                 st.subheader("1) Transformation Summary")
                 if data["summary"]:
                     st.write(data["summary"])
                 else:
                     st.info("No summary returned.")
 
+                # 2) Tableau Steps
                 st.subheader("2) Tableau Prep Step-by-Step")
                 if data["tableau_steps"]:
                     steps_text = "\n".join(
@@ -151,7 +199,7 @@ if convert_clicked:
                     )
                     st.code(steps_text, language="text")
                     st.download_button(
-                        "Copy Steps (.txt)",
+                        "Download Steps (.txt)",
                         steps_text,
                         file_name="tableau_steps.txt",
                         mime="text/plain",
@@ -159,12 +207,15 @@ if convert_clicked:
                 else:
                     st.info("No Tableau steps returned.")
 
-                st.subheader("3) Flow Representation")
+                # 3) Visual Flow
+                st.subheader("3) Tableau Prep Style Flow")
                 if data["flow_diagram"]:
-                    st.code(data["flow_diagram"], language="text")
+                    visual_flow = build_visual_flow(data["flow_diagram"])
+                    st.code(visual_flow, language="text")
                 else:
                     st.info("No flow diagram returned.")
 
+                # 4) Migration Notes
                 st.subheader("4) Migration Notes & Limitations")
                 if data["migration_notes"]:
                     for note in data["migration_notes"]:
@@ -189,6 +240,10 @@ if convert_clicked:
             except Exception as exc:
                 st.error(f"Conversion failed: {exc}")
                 st.exception(exc)
+
+# -----------------------------
+# Footer
+# -----------------------------
 
 st.markdown(
     """
