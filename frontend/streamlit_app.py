@@ -9,6 +9,7 @@ import streamlit as st
 
 # Make sure repo root is importable when Streamlit runs from frontend/
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -20,21 +21,15 @@ if str(PROJECT_ROOT) not in sys.path:
 def build_visual_flow_vertical(flow_text: str) -> str:
     """
     Render flow as stacked boxes with downward arrows.
-
-    Example:
-        ┌───────────────────────┐
-        │         Input         │
-        └───────────────────────┘
-                    ↓
-        ┌───────────────────────┐
-        │         Filter        │
-        └───────────────────────┘
     """
+
     nodes = [n.strip() for n in flow_text.split("->") if n.strip()]
+
     if not nodes:
         return "No flow detected."
 
     width = max(19, max(len(n) for n in nodes) + 4)
+
     border = "┌" + "─" * (width + 2) + "┐"
     divider = "└" + "─" * (width + 2) + "┘"
     indent = " " * ((width // 2) + 2)
@@ -42,6 +37,7 @@ def build_visual_flow_vertical(flow_text: str) -> str:
     visual: List[str] = []
 
     for i, node in enumerate(nodes):
+
         visual.append(
             f"{border}\n"
             f"│ {node.center(width)} │\n"
@@ -57,10 +53,8 @@ def build_visual_flow_vertical(flow_text: str) -> str:
 def build_visual_flow_horizontal(flow_text: str) -> str:
     """
     Render flow as a single left-to-right line.
-
-    Example:
-        [ Input ] → [ Filter ] → [ Change Types ] → [ Output ]
     """
+
     nodes = [n.strip() for n in flow_text.split("->") if n.strip()]
 
     if not nodes:
@@ -69,12 +63,57 @@ def build_visual_flow_horizontal(flow_text: str) -> str:
     parts = []
 
     for i, node in enumerate(nodes):
+
         parts.append(f"[ {node} ]")
 
         if i != len(nodes) - 1:
             parts.append("→")
 
     return "  ".join(parts)
+
+
+# -----------------------------
+# Step formatting helper
+# -----------------------------
+
+def format_tableau_steps(steps: List[str]) -> str:
+    """
+    Improve readability for long datatype conversion lines.
+    """
+
+    formatted_steps = []
+
+    for step in steps:
+
+        if (
+            isinstance(step, str)
+            and "Change data type:" in step
+            and step.count(";") >= 3
+        ):
+
+            parts = step.split("Change data type:")
+
+            if len(parts) > 1:
+
+                datatype_text = parts[1].strip()
+
+                columns = [
+                    c.strip()
+                    for c in datatype_text.split(";")
+                    if c.strip()
+                ]
+
+                pretty_step = "Change data types:\n"
+
+                for col in columns:
+                    pretty_step += f"    • {col}\n"
+
+                formatted_steps.append(pretty_step.strip())
+                continue
+
+        formatted_steps.append(step)
+
+    return "\n\n".join(formatted_steps)
 
 
 # -----------------------------
@@ -87,17 +126,21 @@ st.set_page_config(
 )
 
 st.title("Power Query M → Tableau Prep Migration Assistant")
-st.caption("Runs fully inside Streamlit. No separate backend is required.")
+
+st.caption(
+    "Runs fully inside Streamlit. No separate backend is required."
+)
 
 
 # -----------------------------
 # Converter loader
 # -----------------------------
 
-def _candidate_converter_functions(module: Any) -> List[Callable[[str], Any]]:
+def _candidate_converter_functions(
+    module: Any
+) -> List[Callable[[str], Any]]:
     """
     Return likely converter functions from app.services.converter.
-    Resilient to function renames.
     """
 
     preferred_names = [
@@ -113,6 +156,7 @@ def _candidate_converter_functions(module: Any) -> List[Callable[[str], Any]]:
     funcs: List[Callable[[str], Any]] = []
 
     for name in preferred_names:
+
         fn = getattr(module, name, None)
 
         if callable(fn):
@@ -121,15 +165,22 @@ def _candidate_converter_functions(module: Any) -> List[Callable[[str], Any]]:
     if funcs:
         return funcs
 
-    # Fallback: any public callable with a converter-like name
+    # Fallback search
     for name in dir(module):
+
         if name.startswith("_"):
             continue
 
         if any(
             token in name.lower()
-            for token in ("convert", "transform", "analy", "process")
+            for token in (
+                "convert",
+                "transform",
+                "analy",
+                "process"
+            )
         ):
+
             fn = getattr(module, name, None)
 
             if callable(fn):
@@ -140,15 +191,18 @@ def _candidate_converter_functions(module: Any) -> List[Callable[[str], Any]]:
 
 @st.cache_resource
 def get_converter() -> Callable[[str], Any]:
-    module = importlib.import_module("app.services.converter")
+
+    module = importlib.import_module(
+        "app.services.converter"
+    )
 
     funcs = _candidate_converter_functions(module)
 
     if not funcs:
+
         raise AttributeError(
-            "No converter function found in app.services.converter. "
-            "Add a function such as convert_m_code(m_code) or rename your existing one "
-            "to a supported name."
+            "No converter function found in "
+            "app.services.converter."
         )
 
     return funcs[0]
@@ -156,24 +210,26 @@ def get_converter() -> Callable[[str], Any]:
 
 def normalize_result(result: Any) -> Dict[str, Any]:
     """
-    Normalize converter output into the UI format.
-
-    Expected keys:
-      - summary: str
-      - tableau_steps: list[str]
-      - flow_diagram: str
-      - migration_notes: list[str]
+    Normalize converter output into UI format.
     """
 
     if isinstance(result, dict):
+
         return {
             "summary": str(result.get("summary", "")),
-            "tableau_steps": result.get("tableau_steps", []) or [],
-            "flow_diagram": str(result.get("flow_diagram", "")),
-            "migration_notes": result.get("migration_notes", []) or [],
+            "tableau_steps": (
+                result.get("tableau_steps", []) or []
+            ),
+            "flow_diagram": str(
+                result.get("flow_diagram", "")
+            ),
+            "migration_notes": (
+                result.get("migration_notes", []) or []
+            ),
         }
 
     if isinstance(result, str):
+
         return {
             "summary": result,
             "tableau_steps": [],
@@ -182,6 +238,7 @@ def normalize_result(result: Any) -> Dict[str, Any]:
         }
 
     if isinstance(result, tuple):
+
         items = list(result)
 
         while len(items) < 4:
@@ -190,13 +247,21 @@ def normalize_result(result: Any) -> Dict[str, Any]:
         steps = (
             items[1]
             if isinstance(items[1], list)
-            else ([str(items[1])] if items[1] else [])
+            else (
+                [str(items[1])]
+                if items[1]
+                else []
+            )
         )
 
         notes = (
             items[3]
             if isinstance(items[3], list)
-            else ([str(items[3])] if items[3] else [])
+            else (
+                [str(items[3])]
+                if items[3]
+                else []
+            )
         )
 
         return {
@@ -230,7 +295,8 @@ if "m_code" not in st.session_state:
 # -----------------------------
 
 st.caption(
-    "Supports full Power Query M scripts or partial transformation snippets."
+    "Supports full Power Query M scripts "
+    "or partial transformation snippets."
 )
 
 st.text_area(
@@ -249,9 +315,14 @@ st.text_area(
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    convert_clicked = st.button("Convert", use_container_width=True)
+
+    convert_clicked = st.button(
+        "Convert",
+        use_container_width=True
+    )
 
 with col2:
+
     clear_clicked = st.button(
         "Clear & Convert New",
         use_container_width=True
@@ -263,8 +334,12 @@ with col2:
 # -----------------------------
 
 if clear_clicked:
+
     st.session_state.conversion_data = None
-    del st.session_state["m_code"]
+
+    if "m_code" in st.session_state:
+        del st.session_state["m_code"]
+
     st.rerun()
 
 
@@ -275,34 +350,33 @@ if clear_clicked:
 if convert_clicked:
 
     if not st.session_state.m_code.strip():
+
         st.error("Please paste M code first.")
+
         st.session_state.conversion_data = None
 
     else:
-        with st.spinner("Analyzing and mapping transformations..."):
+
+        with st.spinner(
+            "Analyzing and mapping transformations..."
+        ):
 
             try:
+
                 converter = get_converter()
 
-                raw_result = converter(st.session_state.m_code)
-
-                st.session_state.conversion_data = normalize_result(raw_result)
-
-            except ModuleNotFoundError as exc:
-                st.error(
-                    "Could not import app.services.converter. "
-                    "Check that app/__init__.py and "
-                    "app/services/__init__.py exist, "
-                    "and that converter.py is inside app/services/."
+                raw_result = converter(
+                    st.session_state.m_code
                 )
 
-                st.exception(exc)
+                st.session_state.conversion_data = (
+                    normalize_result(raw_result)
+                )
 
-                st.session_state.conversion_data = None
+            except ModuleNotFoundError as exc:
 
-            except AttributeError as exc:
                 st.error(
-                    "No suitable converter function was found inside "
+                    "Could not import "
                     "app.services.converter."
                 )
 
@@ -310,7 +384,18 @@ if convert_clicked:
 
                 st.session_state.conversion_data = None
 
+            except AttributeError as exc:
+
+                st.error(
+                    "No suitable converter function found."
+                )
+
+                st.exception(exc)
+
+                st.session_state.conversion_data = None
+
             except Exception as exc:
+
                 st.error(f"Conversion failed: {exc}")
 
                 st.exception(exc)
@@ -331,6 +416,7 @@ if st.session_state.conversion_data is not None:
 
     if data["summary"]:
         st.write(data["summary"])
+
     else:
         st.info("No summary returned.")
 
@@ -339,23 +425,29 @@ if st.session_state.conversion_data is not None:
 
     step_count = len(data["tableau_steps"])
 
-    st.caption(f"{step_count} transformation steps detected")
+    st.caption(
+        f"{step_count} transformation steps detected"
+    )
 
     if data["tableau_steps"]:
 
-        steps_text = "\n".join(
-            step if isinstance(step, str) else str(step)
-            for step in data["tableau_steps"]
+        formatted_steps = format_tableau_steps(
+            data["tableau_steps"]
         )
 
-        st.code(steps_text, language="text")
+        with st.expander(
+            "View Detailed Tableau Prep Steps",
+            expanded=True
+        ):
 
-        st.download_button(
-            "Download Steps (.txt)",
-            steps_text,
-            file_name="tableau_steps.txt",
-            mime="text/plain",
-        )
+            st.code(formatted_steps, language="text")
+
+            st.download_button(
+                "Download Steps (.txt)",
+                formatted_steps,
+                file_name="tableau_steps.txt",
+                mime="text/plain",
+            )
 
     else:
         st.info("No Tableau steps returned.")
@@ -372,16 +464,28 @@ if st.session_state.conversion_data is not None:
             label_visibility="collapsed",
         )
 
-        if layout == "Vertical":
-            st.code(
-                build_visual_flow_vertical(data["flow_diagram"]),
-                language="text"
-            )
-        else:
-            st.code(
-                build_visual_flow_horizontal(data["flow_diagram"]),
-                language="text"
-            )
+        with st.expander(
+            "View Transformation Flow",
+            expanded=True
+        ):
+
+            if layout == "Vertical":
+
+                st.code(
+                    build_visual_flow_vertical(
+                        data["flow_diagram"]
+                    ),
+                    language="text"
+                )
+
+            else:
+
+                st.code(
+                    build_visual_flow_horizontal(
+                        data["flow_diagram"]
+                    ),
+                    language="text"
+                )
 
     else:
         st.info("No flow diagram returned.")
@@ -391,8 +495,13 @@ if st.session_state.conversion_data is not None:
 
     if data["migration_notes"]:
 
-        for note in data["migration_notes"]:
-            st.markdown(f"- {note}")
+        with st.expander(
+            "View Migration Notes",
+            expanded=False
+        ):
+
+            for note in data["migration_notes"]:
+                st.markdown(f"- {note}")
 
     else:
         st.info("No migration notes returned.")
@@ -402,16 +511,5 @@ if st.session_state.conversion_data is not None:
 # Footer
 # -----------------------------
 
-st.markdown(
-    """
-    <div style='position: fixed;
-                bottom: 10px;
-                left: 15px;
-                font-size: 14px;
-                color: gray;
-                z-index: 100;'>
-        ❤️ Developed by Shiv
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown("---")
+st.caption("❤️ Developed by Shiv")
