@@ -183,6 +183,10 @@ def normalize_result(result: Any) -> Dict[str, Any]:
 # UI
 # -----------------------------
 
+# Persist conversion result across re-runs (widget interactions re-run the script)
+if "conversion_data" not in st.session_state:
+    st.session_state.conversion_data = None
+
 m_code = st.text_area(
     "Paste Power Query M code",
     height=320,
@@ -194,61 +198,13 @@ convert_clicked = st.button("Convert")
 if convert_clicked:
     if not m_code.strip():
         st.error("Please paste M code first.")
+        st.session_state.conversion_data = None
     else:
         with st.spinner("Analyzing and mapping transformations..."):
             try:
                 converter = get_converter()
                 raw_result = converter(m_code)
-                data = normalize_result(raw_result)
-
-                # 1) Summary
-                st.subheader("1) Transformation Summary")
-                if data["summary"]:
-                    st.write(data["summary"])
-                else:
-                    st.info("No summary returned.")
-
-                # 2) Tableau Steps
-                st.subheader("2) Tableau Prep Step-by-Step")
-                if data["tableau_steps"]:
-                    steps_text = "\n".join(
-                        step if isinstance(step, str) else str(step)
-                        for step in data["tableau_steps"]
-                    )
-                    st.code(steps_text, language="text")
-                    st.download_button(
-                        "Download Steps (.txt)",
-                        steps_text,
-                        file_name="tableau_steps.txt",
-                        mime="text/plain",
-                    )
-                else:
-                    st.info("No Tableau steps returned.")
-
-                # 3) Visual Flow
-                st.subheader("3) Tableau Prep Style Flow")
-                if data["flow_diagram"]:
-                    layout = st.radio(
-                        "Layout",
-                        ["Vertical", "Horizontal"],
-                        horizontal=True,
-                        label_visibility="collapsed",
-                    )
-                    if layout == "Vertical":
-                        st.code(build_visual_flow_vertical(data["flow_diagram"]), language="text")
-                    else:
-                        st.code(build_visual_flow_horizontal(data["flow_diagram"]), language="text")
-                else:
-                    st.info("No flow diagram returned.")
-
-                # 4) Migration Notes
-                st.subheader("4) Migration Notes & Limitations")
-                if data["migration_notes"]:
-                    for note in data["migration_notes"]:
-                        st.markdown(f"- {note}")
-                else:
-                    st.info("No migration notes returned.")
-
+                st.session_state.conversion_data = normalize_result(raw_result)
             except ModuleNotFoundError as exc:
                 st.error(
                     "Could not import app.services.converter. "
@@ -256,16 +212,69 @@ if convert_clicked:
                     "and that converter.py is inside app/services/."
                 )
                 st.exception(exc)
-
+                st.session_state.conversion_data = None
             except AttributeError as exc:
                 st.error(
                     "No suitable converter function was found inside app.services.converter."
                 )
                 st.exception(exc)
-
+                st.session_state.conversion_data = None
             except Exception as exc:
                 st.error(f"Conversion failed: {exc}")
                 st.exception(exc)
+                st.session_state.conversion_data = None
+
+# Render results — runs on every re-run (including radio toggle clicks)
+if st.session_state.conversion_data is not None:
+    data = st.session_state.conversion_data
+
+    # 1) Summary
+    st.subheader("1) Transformation Summary")
+    if data["summary"]:
+        st.write(data["summary"])
+    else:
+        st.info("No summary returned.")
+
+    # 2) Tableau Steps
+    st.subheader("2) Tableau Prep Step-by-Step")
+    if data["tableau_steps"]:
+        steps_text = "\n".join(
+            step if isinstance(step, str) else str(step)
+            for step in data["tableau_steps"]
+        )
+        st.code(steps_text, language="text")
+        st.download_button(
+            "Download Steps (.txt)",
+            steps_text,
+            file_name="tableau_steps.txt",
+            mime="text/plain",
+        )
+    else:
+        st.info("No Tableau steps returned.")
+
+    # 3) Visual Flow
+    st.subheader("3) Tableau Prep Style Flow")
+    if data["flow_diagram"]:
+        layout = st.radio(
+            "Layout",
+            ["Vertical", "Horizontal"],
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+        if layout == "Vertical":
+            st.code(build_visual_flow_vertical(data["flow_diagram"]), language="text")
+        else:
+            st.code(build_visual_flow_horizontal(data["flow_diagram"]), language="text")
+    else:
+        st.info("No flow diagram returned.")
+
+    # 4) Migration Notes
+    st.subheader("4) Migration Notes & Limitations")
+    if data["migration_notes"]:
+        for note in data["migration_notes"]:
+            st.markdown(f"- {note}")
+    else:
+        st.info("No migration notes returned.")
 
 # -----------------------------
 # Footer
