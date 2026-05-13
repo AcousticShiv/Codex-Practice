@@ -92,6 +92,11 @@ def format_tableau_steps(steps: List[str]) -> str:
         ):
 
             guidance = ""
+            step_number = ""
+
+            # Extract step number like "6."
+            if ". " in step[:5]:
+                step_number = step.split(". ", 1)[0] + ". "
 
             if ". In Tableau Prep" in step:
 
@@ -108,6 +113,9 @@ def format_tableau_steps(steps: List[str]) -> str:
                 datatype_part = step
 
             datatype_text = datatype_part.replace(
+                step_number,
+                ""
+            ).replace(
                 "Change data type:",
                 ""
             ).strip()
@@ -118,7 +126,9 @@ def format_tableau_steps(steps: List[str]) -> str:
                 if c.strip()
             ]
 
-            pretty_step = "Change data types:\n\n"
+            pretty_step = (
+                f"{step_number}Change data types:\n\n"
+            )
 
             for col in columns:
 
