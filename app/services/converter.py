@@ -100,13 +100,104 @@ def _friendly_type_name(raw_type: str) -> str:
     return cleaned or raw_type
 
 
+def _get_call_args(expr: str, func_name: str) -> List[str]:
+    """
+    Return top-level arguments for a function call like Table.X(...).
+    Works reasonably well for multiline M expressions.
+    """
+    m = re.search(rf"{re.escape(func_name)}\s*\((.*)\)\s*$", expr, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return []
+
+    inner = m.group(1)
+    args: List[str] = []
+    buf: List[str] = []
+
+    depth_paren = 0
+    depth_brace = 0
+    depth_bracket = 0
+    in_string = False
+
+    i = 0
+    while i < len(inner):
+        ch = inner[i]
+        nxt = inner[i + 1] if i + 1 < len(inner) else ""
+
+        if ch == '"':
+            if in_string and nxt == '"':
+                buf.append(ch)
+                buf.append(nxt)
+                i += 2
+                continue
+            in_string = not in_string
+            buf.append(ch)
+            i += 1
+            continue
+
+        if not in_string:
+            if ch == "(":
+                depth_paren += 1
+            elif ch == ")":
+                depth_paren = max(0, depth_paren - 1)
+            elif ch == "{":
+                depth_brace += 1
+            elif ch == "}":
+                depth_brace = max(0, depth_brace - 1)
+            elif ch == "[":
+                depth_bracket += 1
+            elif ch == "]":
+                depth_bracket = max(0, depth_bracket - 1)
+            elif ch == "," and depth_paren == 0 and depth_brace == 0 and depth_bracket == 0:
+                arg = "".join(buf).strip()
+                if arg:
+                    args.append(arg)
+                buf = []
+                i += 1
+                continue
+
+        buf.append(ch)
+        i += 1
+
+    tail = "".join(buf).strip()
+    if tail:
+        args.append(tail)
+
+    return args
+
+
+def _normalize_ref(text: str) -> str:
+    text = text.strip()
+
+    quoted = re.findall(r'"([^"]+)"', text)
+    if quoted:
+        return quoted[-1].strip()
+
+    if text.startswith('#"') and text.endswith('"'):
+        return text[2:-1].strip()
+
+    return text.strip()
+
+
 def _extract_quoted_strings(text: str) -> List[str]:
     return re.findall(r'"([^"]+)"', text)
 
 
+def _dedupe_nonempty(items: List[str]) -> List[str]:
+    return _dedupe_preserve_order([item for item in items if item and item.strip()])
+
+
 def _parse_remove_columns(expr: str) -> List[str]:
+    """
+    Example:
+      Table.RemoveColumns(Source,{"BSART","VENDOR_ID"})
+    """
+    args = _get_call_args(expr, "Table.RemoveColumns")
+    if len(args) >= 2:
+        cols = _extract_quoted_strings(args[1])
+        return _dedupe_nonempty(cols)
+
     cols = _extract_quoted_strings(expr)
-    return _dedupe_preserve_order(cols)
+    return _dedupe_nonempty(cols)
 
 
 def _parse_type_conversions(expr: str) -> List[Tuple[str, str]]:
@@ -119,53 +210,135 @@ def _parse_type_conversions(expr: str) -> List[Tuple[str, str]]:
 
 
 def _parse_rename_pairs(expr: str) -> List[Tuple[str, str]]:
-    """
-    Example:
-      Table.RenameColumns(Source,{{"Old","New"}})
-    """
+    args = _get_call_args(expr, "Table.RenameColumns")
+    if len(args) >= 2:
+        pairs = re.findall(r'\{\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\}', args[1])
+        return [(old.strip(), new.strip()) for old, new in pairs]
+
     pairs = re.findall(r'\{\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\}', expr)
     return [(old.strip(), new.strip()) for old, new in pairs]
 
 
-def _parse_add_column_name(expr: str) -> str | None:
-    m = re.search(r'Table\.AddColumn\s*\(.*?,\s*"([^"]+)"\s*,', expr, re.IGNORECASE | re.DOTALL)
-    if m:
-        return m.group(1).strip()
+def _parse_transformcolumns_proper_fields(expr: str) -> List[str]:
+    """
+    Example:
+      Table.TransformColumns(Source,{{"ORT01", Text.Proper, type text}, {"CustomerName", Text.Proper, type text}})
+    """
+    args = _get_call_args(expr, "Table.TransformColumns")
+    target_expr = args[1] if len(args) >= 2 else expr
+    fields = re.findall(r'\{\s*"([^"]+)"\s*,\s*Text\.Proper\b', target_expr, re.IGNORECASE)
+    return _dedupe_nonempty(fields)
 
-    quoted = _extract_quoted_strings(expr)
-    return quoted[1].strip() if len(quoted) >= 2 else None
+
+def _parse_add_column_name(expr: str) -> str | None:
+    args = _get_call_args(expr, "Table.AddColumn")
+    if len(args) >= 2:
+        name = _normalize_ref(args[1])
+        return name or None
+
+    m = re.search(r'Table\.AddColumn\s*\(.*?,\s*"([^"]+)"\s*,', expr, re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip() if m else None
 
 
 def _parse_group_keys(expr: str) -> List[str]:
-    m = re.search(r'Table\.Group\s*\(.*?,\s*\{(.*?)\}\s*,', expr, re.IGNORECASE | re.DOTALL)
-    if not m:
-        return []
-    keys = _extract_quoted_strings(m.group(1))
-    return _dedupe_preserve_order(keys)
+    args = _get_call_args(expr, "Table.Group")
+    if len(args) >= 2:
+        keys = _extract_quoted_strings(args[1])
+        return _dedupe_nonempty(keys)
+    return []
 
 
-def _parse_pivot_info(expr: str) -> Dict[str, Any]:
+def _parse_nested_join(expr: str) -> Dict[str, List[str] | str]:
+    args = _get_call_args(expr, "Table.NestedJoin")
+    info: Dict[str, List[str] | str] = {
+        "left_table": "",
+        "right_table": "",
+        "left_keys": [],
+        "right_keys": [],
+        "nested_name": "",
+    }
+
+    if len(args) >= 5:
+        info["left_table"] = _normalize_ref(args[0])
+        info["left_keys"] = _extract_quoted_strings(args[1])
+        info["right_table"] = _normalize_ref(args[2])
+        info["right_keys"] = _extract_quoted_strings(args[3])
+        info["nested_name"] = _normalize_ref(args[4])
+        return info
+
     quoted = _extract_quoted_strings(expr)
-    info: Dict[str, Any] = {"column": None, "values": []}
-
-    if "Table.Pivot" in expr:
-        if len(quoted) >= 2:
-            info["column"] = quoted[1]
-        if len(quoted) >= 3:
-            info["values"] = quoted[2:]
-    elif "Table.UnpivotOtherColumns" in expr:
-        if len(quoted) >= 1:
-            info["values"] = quoted
-    elif "Table.Unpivot" in expr:
-        if len(quoted) >= 2:
-            info["column"] = quoted[1]
-        if len(quoted) >= 3:
-            info["values"] = quoted[2:]
-
+    if quoted:
+        info["nested_name"] = quoted[-1]
     return info
 
 
-def _summarize_operations(operations: List[Dict[str, str]]) -> str:
+def _parse_expand_table_column(expr: str) -> Dict[str, List[str] | str]:
+    args = _get_call_args(expr, "Table.ExpandTableColumn")
+    info: Dict[str, List[str] | str] = {
+        "source_table": "",
+        "nested_column": "",
+        "expanded_cols": [],
+        "new_names": [],
+    }
+
+    if len(args) >= 4:
+        info["source_table"] = _normalize_ref(args[0])
+        info["nested_column"] = _normalize_ref(args[1])
+        info["expanded_cols"] = _extract_quoted_strings(args[2])
+        info["new_names"] = _extract_quoted_strings(args[3])
+        return info
+
+    quoted = _extract_quoted_strings(expr)
+    if quoted:
+        info["nested_column"] = quoted[0]
+    return info
+
+
+def _parse_replace_value_columns(expr: str) -> List[str]:
+    """
+    Example:
+      Table.ReplaceValue(#"Changed Type1","X","1",Replacer.ReplaceText,{"Order_Block", ...})
+    """
+    args = _get_call_args(expr, "Table.ReplaceValue")
+    if len(args) >= 5:
+        cols = _extract_quoted_strings(args[4])
+        return _dedupe_nonempty(cols)
+
+    # Fallback: last brace list inside the expression
+    start = expr.rfind("{")
+    end = expr.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        cols = _extract_quoted_strings(expr[start : end + 1])
+        return _dedupe_nonempty(cols)
+
+    return []
+
+
+def _parse_unpivot_info(expr: str) -> Dict[str, Any]:
+    args = _get_call_args(expr, "Table.UnpivotOtherColumns")
+    if len(args) >= 2:
+        kept = _extract_quoted_strings(args[1])
+        return {"mode": "other_columns", "kept_columns": kept}
+
+    args = _get_call_args(expr, "Table.Unpivot")
+    if len(args) >= 2:
+        cols = _extract_quoted_strings(args[1])
+        return {"mode": "columns", "cols": cols}
+
+    return {"mode": "unknown"}
+
+
+def _parse_pivot_info(expr: str) -> Dict[str, Any]:
+    args = _get_call_args(expr, "Table.Pivot")
+    if len(args) >= 2:
+        pivot_values = _extract_quoted_strings(args[1])
+        pivot_col = _normalize_ref(args[2]) if len(args) >= 3 else ""
+        return {"pivot_values": pivot_values, "pivot_col": pivot_col}
+
+    return {"pivot_values": [], "pivot_col": ""}
+
+
+def _build_summary(operations: List[Dict[str, str]]) -> str:
     if not operations:
         return (
             "No major Power Query transformations were detected. "
@@ -221,7 +394,7 @@ def _build_tableau_steps(operations: List[Dict[str, str]]) -> List[str]:
         elif op["type"] == "Pivot":
             tableau_hint = "In Tableau Prep, use a Pivot step."
         elif op["type"] == "Unpivot":
-            tableau_hint = "In Tableau Prep, use a Pivot step in reverse / reshape columns as rows."
+            tableau_hint = "In Tableau Prep, reshape columns into rows with a Pivot-style transformation."
         else:
             tableau_hint = "Map this step manually in Tableau Prep."
 
@@ -332,7 +505,7 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
             continue
 
         if "table.selectrows" in expr_low:
-            if "each true" in expr_low.replace(" ", ""):
+            if re.search(r"\beach\s+true\b", expr_low, re.IGNORECASE):
                 continue
 
             cond_match = re.search(r"each\s+(.+?)(?:\)\s*,?\s*$|\)\s*in\s*$)", expr, re.IGNORECASE)
@@ -382,10 +555,7 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
 
         if "table.addcolumn" in expr_low:
             new_col = _parse_add_column_name(expr)
-            if new_col:
-                desc = f"Add calculated column: {new_col}."
-            else:
-                desc = "Add a calculated column."
+            desc = f"Add calculated column: {new_col}." if new_col else "Add a calculated column."
             operations.append(
                 {
                     "step": step_name,
@@ -411,34 +581,51 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
             continue
 
         if "table.nestedjoin" in expr_low:
-            tables = _extract_quoted_strings(expr)
-            if len(tables) >= 2:
-                left_table = tables[0]
-                right_table = tables[1]
-                description = f"Join '{left_table}' with lookup table '{right_table}'."
+            info = _parse_nested_join(expr)
+            left_table = str(info.get("left_table", "")).strip()
+            right_table = str(info.get("right_table", "")).strip()
+            left_keys = info.get("left_keys", []) or []
+            right_keys = info.get("right_keys", []) or []
+
+            if left_table and right_table and left_keys and right_keys:
+                desc = (
+                    f"Join '{left_table}' on {', '.join(left_keys)} "
+                    f"with '{right_table}' on {', '.join(right_keys)}."
+                )
+            elif right_table:
+                desc = f"Join with lookup table '{right_table}'."
             else:
-                description = "Join tables using a merge operation."
+                desc = "Join tables using a merge operation."
+
             operations.append(
                 {
                     "step": step_name,
                     "type": "Join",
-                    "description": description,
+                    "description": desc,
                 }
             )
             continue
 
         if "table.expandtablecolumn" in expr_low:
-            cols = _extract_quoted_strings(expr)
-            if len(cols) > 2:
-                expanded = cols[2:]
-                expanded_text = ", ".join(expanded)
+            info = _parse_expand_table_column(expr)
+            nested_column = str(info.get("nested_column", "")).strip()
+            expanded_cols = info.get("expanded_cols", []) or []
+            new_names = info.get("new_names", []) or []
+
+            if nested_column and expanded_cols:
+                if new_names and len(new_names) == len(expanded_cols):
+                    pairs = ", ".join(f"{src} → {dst}" for src, dst in zip(expanded_cols, new_names))
+                    desc = f"Expand '{nested_column}' to: {pairs}."
+                else:
+                    desc = f"Expand '{nested_column}' to fields: {', '.join(expanded_cols)}."
             else:
-                expanded_text = "expanded fields"
+                desc = "Expand joined table columns."
+
             operations.append(
                 {
                     "step": step_name,
                     "type": "Expand",
-                    "description": f"Expand joined table columns: {expanded_text}.",
+                    "description": desc,
                 }
             )
             continue
@@ -464,17 +651,9 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
             continue
 
         if "table.replacevalue" in expr_low:
-            quoted = _extract_quoted_strings(expr)
-            target_columns: List[str] = []
-            for q in quoted:
-                low = q.lower().strip()
-                if low not in {"x", "y", "null", "replacer.replacetext", "replacer.replacevalue"}:
-                    target_columns.append(q)
-
-            target_columns = _dedupe_preserve_order(target_columns)
-            if target_columns:
-                cols = ", ".join(f"'{c}'" for c in target_columns)
-                desc = f"Replace values in {cols}."
+            target_cols = _parse_replace_value_columns(expr)
+            if target_cols:
+                desc = f"Replace values in columns: {', '.join(target_cols)}."
             else:
                 desc = "Replace values in selected columns."
 
@@ -487,12 +666,47 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
             )
             continue
 
-        if "table.unpivotothercolumns" in expr_low or "table.unpivot" in expr_low:
-            info = _parse_pivot_info(expr)
-            if info["values"]:
-                desc = "Unpivot columns: " + ", ".join(info["values"]) + "."
+        if "table.transformcolumns" in expr_low and "text.proper" in expr_low:
+            fields = _parse_transformcolumns_proper_fields(expr)
+            if fields:
+                desc = f"Apply proper-case formatting to {', '.join(fields)}."
+            else:
+                desc = "Apply proper-case formatting to selected text columns."
+
+            operations.append(
+                {
+                    "step": step_name,
+                    "type": "Capitalize Text",
+                    "description": desc,
+                }
+            )
+            continue
+
+        if "table.unpivotothercolumns" in expr_low:
+            info = _parse_unpivot_info(expr)
+            kept = info.get("kept_columns", []) or []
+            if kept:
+                desc = f"Unpivot all other columns, keeping {', '.join(kept)}."
+            else:
+                desc = "Unpivot other columns into attribute/value rows."
+
+            operations.append(
+                {
+                    "step": step_name,
+                    "type": "Unpivot",
+                    "description": desc,
+                }
+            )
+            continue
+
+        if "table.unpivot" in expr_low:
+            info = _parse_unpivot_info(expr)
+            cols = info.get("cols", []) or []
+            if cols:
+                desc = f"Unpivot columns: {', '.join(cols)}."
             else:
                 desc = "Unpivot columns into attribute/value rows."
+
             operations.append(
                 {
                     "step": step_name,
@@ -504,10 +718,16 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
 
         if "table.pivot" in expr_low:
             info = _parse_pivot_info(expr)
-            if info["column"]:
-                desc = f"Pivot using column: {info['column']}."
+            pivot_values = info.get("pivot_values", []) or []
+            pivot_col = str(info.get("pivot_col", "")).strip()
+
+            if pivot_col:
+                desc = f"Pivot using column '{pivot_col}'."
+            elif pivot_values:
+                desc = f"Pivot values: {', '.join(pivot_values)}."
             else:
                 desc = "Pivot data to reshape rows into columns."
+
             operations.append(
                 {
                     "step": step_name,
@@ -537,9 +757,18 @@ def convert_m_code(m_code: str) -> Dict[str, Any]:
     operations = _detect_operations(code)
 
     return {
-        "summary": _summarize_operations(operations),
+        "summary": _build_summary(operations),
         "tableau_steps": _build_tableau_steps(operations),
         "flow_diagram": _build_flow_diagram(operations),
         "migration_notes": _build_notes(operations, code),
         "parsed_steps": operations,
     }
+
+
+# Backward-compatible aliases
+convert = convert_m_code
+generate_conversion = convert_m_code
+process_m_code = convert_m_code
+analyze_m_code = convert_m_code
+convert_power_query_m = convert_m_code
+convert_m_to_tableau_prep = convert_m_code
