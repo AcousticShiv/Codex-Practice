@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 
 # -----------------------------
@@ -10,23 +9,6 @@ from typing import Any, Dict, List, Tuple
 # -----------------------------
 
 _COMMENT_RE = re.compile(r"//.*?$", re.MULTILINE)
-
-# Common Power Query functions we can recognize
-_OPERATION_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\bSql\.Database\s*\(", re.IGNORECASE), "Connect to a SQL database source"),
-    (re.compile(r"\bTable\.SelectRows\s*\(", re.IGNORECASE), "Filter rows"),
-    (re.compile(r"\bTable\.TransformColumnTypes\s*\(", re.IGNORECASE), "Change column data types"),
-    (re.compile(r"\bTable\.ReplaceValue\s*\(", re.IGNORECASE), "Replace values"),
-    (re.compile(r"\bTable\.TransformColumns\s*\(", re.IGNORECASE), "Transform column values"),
-    (re.compile(r"\bTable\.NestedJoin\s*\(", re.IGNORECASE), "Join tables"),
-    (re.compile(r"\bTable\.ExpandTableColumn\s*\(", re.IGNORECASE), "Expand joined table columns"),
-    (re.compile(r"\bTable\.RenameColumns\s*\(", re.IGNORECASE), "Rename columns"),
-    (re.compile(r"\bTable\.RemoveColumns\s*\(", re.IGNORECASE), "Remove columns"),
-    (re.compile(r"\bTable\.AddColumn\s*\(", re.IGNORECASE), "Add calculated column"),
-    (re.compile(r"\bTable\.Group\s*\(", re.IGNORECASE), "Group / aggregate rows"),
-    (re.compile(r"\bTable\.Sort\s*\(", re.IGNORECASE), "Sort rows"),
-    (re.compile(r"\bTable\.Distinct\s*\(", re.IGNORECASE), "Remove duplicate rows"),
-]
 
 
 def _strip_comments(code: str) -> str:
@@ -67,15 +49,58 @@ def _extract_expression(line: str) -> str:
     return m.group("expr").rstrip(",").strip()
 
 
-def _extract_quoted_items(text: str) -> List[str]:
-    return re.findall(r'"([^"]+)"', text)
+def _dedupe_preserve_order(items: List[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def _friendly_type_name(raw_type: str) -> str:
+    """
+    Convert M type tokens into Tableau-friendly names.
+    """
+    t = raw_type.strip().lower()
+
+    mapping = {
+        "int64.type": "Whole Number",
+        "number.type": "Decimal Number",
+        "type text": "Text",
+        "text": "Text",
+        "type date": "Date",
+        "date.type": "Date",
+        "type datetime": "Date & Time",
+        "datetime.type": "Date & Time",
+        "type logical": "True/False",
+        "logical.type": "True/False",
+        "type time": "Time",
+        "time.type": "Time",
+        "type duration": "Duration",
+        "duration.type": "Duration",
+    }
+
+    if t in mapping:
+        return mapping[t]
+
+    # Fallback cleanup
+    cleaned = raw_type.replace(".Type", "").replace(".type", "").strip()
+    cleaned = cleaned.replace("type ", "").strip()
+    if not cleaned:
+        return raw_type
+    return cleaned
 
 
 def _format_columns_from_text(text: str) -> str:
-    cols = []
-    for item in _extract_quoted_items(text):
-        # Filter out obvious type tokens / non-column tokens
-        if item.lower() in {
+    """
+    Try to find column names inside a step expression and return them in a readable form.
+    """
+    cols: List[str] = []
+    for item in re.findall(r'"([^"]+)"', text):
+        low = item.lower().strip()
+        if low in {
             "type text",
             "text",
             "int64.type",
@@ -83,25 +108,45 @@ def _format_columns_from_text(text: str) -> str:
             "date.type",
             "datetime.type",
             "logical.type",
+            "time.type",
+            "duration.type",
             "null",
+            "replacer.replacetext",
+            "replacer.replacevalue",
         }:
             continue
         cols.append(item)
 
-    # de-duplicate while preserving order
-    seen = set()
-    unique = []
-    for c in cols:
-        if c not in seen:
-            seen.add(c)
-            unique.append(c)
+    cols = _dedupe_preserve_order(cols)
 
-    if not unique:
+    if not cols:
         return "selected columns"
 
-    if len(unique) == 1:
-        return f"'{unique[0]}'"
-    return ", ".join(f"'{c}'" for c in unique)
+    if len(cols) == 1:
+        return f"'{cols[0]}'"
+
+    return ", ".join(f"'{c}'" for c in cols)
+
+
+def _parse_remove_columns(expr: str) -> List[str]:
+    """
+    Parse columns from:
+        Table.RemoveColumns(Source,{"BSART"})
+    """
+    cols = re.findall(r'"([^"]+)"', expr)
+    return _dedupe_preserve_order(cols)
+
+
+def _parse_type_conversions(expr: str) -> List[tuple[str, str]]:
+    """
+    Parse pairs from:
+        Table.TransformColumnTypes(Source,{{"PO_CREATION_DATE", type date}, {"X", Int64.Type}})
+    """
+    pairs = re.findall(r'\{\s*"([^"]+)"\s*,\s*([^{}]+?)\s*\}', expr)
+    cleaned: List[tuple[str, str]] = []
+    for col_name, raw_type in pairs:
+        cleaned.append((col_name.strip(), raw_type.strip()))
+    return cleaned
 
 
 def _detect_operations(code: str) -> List[Dict[str, str]]:
@@ -112,7 +157,6 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
         expr = _extract_expression(line)
         step_name = _extract_step_name(line)
 
-        # Detect common patterns in the expression
         if "Sql.Database" in expr:
             operations.append(
                 {
@@ -123,55 +167,86 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
             )
             continue
 
+        if "Table.RemoveColumns" in expr:
+            removed_cols = _parse_remove_columns(expr)
+            if removed_cols:
+                desc = f"Remove column(s): {', '.join(removed_cols)}."
+            else:
+                desc = "Remove one or more columns."
+            operations.append(
+                {
+                    "step": step_name,
+                    "type": "Remove Columns",
+                    "description": desc,
+                }
+            )
+            continue
+
         if "Table.SelectRows" in expr:
             if "each true" in expr.replace(" ", "").lower():
-                # No-op filter; ignore as a business step
+                # No-op filter; ignore as a business step.
                 continue
 
-            cond_match = re.search(r"each\s+(.+?)(?:\)\s*,?\s*$|\)\s*in\s*$)", expr, re.IGNORECASE)
+            cond_match = re.search(
+                r"each\s+(.+?)(?:\)\s*,?\s*$|\)\s*in\s*$)",
+                expr,
+                re.IGNORECASE,
+            )
             condition = cond_match.group(1).strip() if cond_match else "custom condition"
             operations.append(
                 {
                     "step": step_name,
                     "type": "Filter",
-                    "description": f"Filter rows using condition: {condition}",
+                    "description": f"Filter rows using condition: {condition}.",
                 }
             )
             continue
 
         if "Table.TransformColumnTypes" in expr:
-            cols = _format_columns_from_text(expr)
+            pairs = _parse_type_conversions(expr)
+            if pairs:
+                parts = []
+                for col_name, raw_type in pairs:
+                    friendly = _friendly_type_name(raw_type)
+                    parts.append(f"{col_name} → {friendly}")
+                desc = "Change data type: " + "; ".join(parts) + "."
+            else:
+                desc = "Change column data types."
             operations.append(
                 {
                     "step": step_name,
                     "type": "Change Types",
-                    "description": f"Change data types for {cols}.",
+                    "description": desc,
                 }
             )
             continue
 
         if "Table.ReplaceValue" in expr:
-            quoted = _extract_quoted_items(expr)
-            target_columns = []
-            # The last brace list often contains columns; the generic extraction above is good enough
+            quoted = re.findall(r'"([^"]+)"', expr)
+            target_columns: List[str] = []
             for q in quoted:
-                if q.lower() not in {"x", "y", "null", "replacer.replacetext", "replacer.replacevalue"}:
+                low = q.lower().strip()
+                if low not in {
+                    "x",
+                    "y",
+                    "null",
+                    "replacer.replacetext",
+                    "replacer.replacevalue",
+                }:
                     target_columns.append(q)
 
-            # Deduplicate
-            deduped = []
-            seen = set()
-            for c in target_columns:
-                if c not in seen:
-                    seen.add(c)
-                    deduped.append(c)
+            target_columns = _dedupe_preserve_order(target_columns)
+            if target_columns:
+                cols = ", ".join(f"'{c}'" for c in target_columns)
+                desc = f"Replace values in {cols}."
+            else:
+                desc = "Replace values in selected columns."
 
-            cols = ", ".join(f"'{c}'" for c in deduped) if deduped else "selected columns"
             operations.append(
                 {
                     "step": step_name,
                     "type": "Replace Values",
-                    "description": f"Replace values in {cols}.",
+                    "description": desc,
                 }
             )
             continue
@@ -188,7 +263,7 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
             continue
 
         if "Table.NestedJoin" in expr:
-            tables = _extract_quoted_items(expr)
+            tables = re.findall(r'"([^"]+)"', expr)
             if len(tables) >= 2:
                 left_table = tables[0]
                 right_table = tables[1]
@@ -205,11 +280,10 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
             continue
 
         if "Table.ExpandTableColumn" in expr:
-            cols = _extract_quoted_items(expr)
-            if cols:
-                # First two are usually source table + nested table name; remaining are expanded columns
-                expanded = cols[2:] if len(cols) > 2 else cols
-                expanded_text = ", ".join(f"'{c}'" for c in expanded) if expanded else "expanded fields"
+            cols = re.findall(r'"([^"]+)"', expr)
+            if len(cols) > 2:
+                expanded = cols[2:]
+                expanded_text = ", ".join(f"'{c}'" for c in expanded)
             else:
                 expanded_text = "expanded fields"
             operations.append(
@@ -231,12 +305,12 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
             )
             continue
 
-        if "Table.RemoveColumns" in expr:
+        if "Table.RemoveRowsWithErrors" in expr:
             operations.append(
                 {
                     "step": step_name,
-                    "type": "Remove Columns",
-                    "description": "Remove one or more columns.",
+                    "type": "Remove Errors",
+                    "description": "Remove rows with errors.",
                 }
             )
             continue
@@ -281,17 +355,15 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
             )
             continue
 
-        # Ignore boring plumbing steps like previous step references
-        if re.fullmatch(r'#"[^"]+"', step_name) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", step_name):
-            # Keep unrecognized steps only if they look useful
-            if any(token in expr for token in ("Text.", "Date.", "Number.", "List.", "Record.", "Table.")):
-                operations.append(
-                    {
-                        "step": step_name,
-                        "type": "Custom",
-                        "description": f"Custom Power Query transformation: {expr[:180]}",
-                    }
-                )
+        # Ignore boring plumbing steps unless they contain meaningful transformation hints.
+        if any(token in expr for token in ("Text.", "Date.", "Number.", "List.", "Record.", "Table.")):
+            operations.append(
+                {
+                    "step": step_name,
+                    "type": "Custom",
+                    "description": f"Custom Power Query transformation: {expr[:180]}",
+                }
+            )
 
     return operations
 
@@ -303,9 +375,9 @@ def _build_summary(operations: List[Dict[str, str]]) -> str:
             "The script may be very short, heavily nested, or use patterns that are not yet recognized."
         )
 
-    op_types = [op["type"] for op in operations]
     counts: Dict[str, int] = {}
-    for t in op_types:
+    for op in operations:
+        t = op["type"]
         counts[t] = counts.get(t, 0) + 1
 
     parts = [f"{count} {name.lower()}" for name, count in counts.items()]
@@ -355,6 +427,8 @@ def _build_tableau_steps(operations: List[Dict[str, str]]) -> List[str]:
             tableau_hint = "In Tableau Prep, sort rows in a Clean step."
         elif op["type"] == "Deduplicate":
             tableau_hint = "In Tableau Prep, use a Clean step to remove duplicates."
+        elif op["type"] == "Remove Errors":
+            tableau_hint = "In Tableau Prep, filter out error rows in a Clean step."
         else:
             tableau_hint = "Map this step manually in Tableau Prep."
 
@@ -375,7 +449,6 @@ def _build_flow_diagram(operations: List[Dict[str, str]]) -> str:
         nodes.append(label)
     nodes.append("Output")
 
-    # Keep consecutive duplicates out of the diagram
     compact: List[str] = []
     for node in nodes:
         if not compact or compact[-1] != node:
@@ -421,26 +494,19 @@ def _build_notes(operations: List[Dict[str, str]], code: str) -> List[str]:
 def convert_m_code(m_code: str) -> Dict[str, Any]:
     """
     Convert Power Query M code into a Tableau Prep migration guide.
-
-    Returns a dictionary with:
-      - summary
-      - tableau_steps
-      - flow_diagram
-      - migration_notes
     """
     code = m_code or ""
     operations = _detect_operations(code)
 
-    result = {
+    return {
         "summary": _build_summary(operations),
         "tableau_steps": _build_tableau_steps(operations),
         "flow_diagram": _build_flow_diagram(operations),
         "migration_notes": _build_notes(operations, code),
     }
-    return result
 
 
-# Backward-compatible aliases for the Streamlit app's function lookup
+# Backward-compatible aliases
 convert = convert_m_code
 generate_conversion = convert_m_code
 process_m_code = convert_m_code
