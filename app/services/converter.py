@@ -296,11 +296,11 @@ def _parse_replace_value_info(expr: str) -> Dict[str, Any]:
     }
 
     if len(args) >= 5:
-        info["old_value"] = _normalize_ref(args[1])
-        info["new_value"] = _normalize_ref(args[2])
-        info["replacement_kind"] = _normalize_ref(args[3])
-        info["columns"] = _extract_quoted_strings(args[4])
-        return info
+     info["old_value"] = args[1].strip()
+     info["new_value"] = args[2].strip()
+     info["replacement_kind"] = _normalize_ref(args[3])
+     info["columns"] = _extract_quoted_strings(args[4])
+    return info
 
     # Fallback: use first two quoted values as old/new, last brace list as columns
     quoted = _extract_quoted_strings(expr)
