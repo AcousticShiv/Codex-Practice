@@ -92,9 +92,9 @@ def format_tableau_steps(steps: List[str]) -> str:
         clean_step = step.strip()
 
         # Improve ReplaceValue wording
-        if "Replace IIL with value" in clean_step:
+        if "Replace IIL with value in columns:" in clean_step:
             clean_step = clean_step.replace(
-                "Replace IIL with value",
+                "Replace IIL with value in columns:",
                 "Remove text 'IIL ' from columns"
             )
 
