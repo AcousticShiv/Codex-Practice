@@ -571,5 +571,11 @@ if st.session_state.conversion_data is not None:
 # Footer
 # -----------------------------
 
-st.markdown("---")
-st.caption("❤️ Developed by Shiv")
+st.markdown(
+    """
+    <div style='position: fixed; bottom: 10px; left: 15px; font-size: 14px; color: gray; z-index: 100;'>
+        ❤️ Developed by Shiv
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
