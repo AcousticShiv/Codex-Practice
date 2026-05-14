@@ -489,7 +489,7 @@ if st.session_state.conversion_data is not None:
 
         with st.expander(
             "View Detailed Tableau Prep Steps",
-            expanded=False
+            expanded=True
         ):
 
             st.code(formatted_steps, language="text")
@@ -517,7 +517,7 @@ if st.session_state.conversion_data is not None:
 
         layout = st.radio(
             "Layout",
-            ["Vertical", "Horizontal"],
+            ["Horizontal", "Vertical"],
             horizontal=True,
             label_visibility="collapsed",
         )
