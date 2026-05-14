@@ -632,14 +632,18 @@ def _detect_operations(code: str) -> List[Dict[str, str]]:
             old_value = str(info.get("old_value", "")).strip()
             new_value = str(info.get("new_value", "")).strip()
 
+            # Use clear labels: show quoted value, "empty string" for blank, or generic fallback
+            old_display = f'"{old_value}"' if old_value else "value"
+            new_display = f'"{new_value}"' if new_value else "empty string"
+
             if columns:
                 if old_value or new_value:
-                    desc = f"Replace {old_value or 'value'} with {new_value or 'value'} in columns: {', '.join(columns)}."
+                    desc = f"Replace {old_display} with {new_display} in columns: {', '.join(columns)}."
                 else:
                     desc = f"Replace values in columns: {', '.join(columns)}."
             else:
                 if old_value or new_value:
-                    desc = f"Replace {old_value or 'value'} with {new_value or 'value'}."
+                    desc = f"Replace {old_display} with {new_display}."
                 else:
                     desc = "Replace values in selected columns."
             operations.append({"step": step_name, "type": "Replace Values", "description": desc})
